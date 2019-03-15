@@ -21,6 +21,8 @@ from __future__ import print_function
 
 import collections
 import functools
+import multiprocessing.dummy as dummy_multiprocessing
+import time
 
 import numpy as np
 import tensorflow as tf
@@ -31,19 +33,33 @@ from tf_agents.environments import time_step as ts
 from tf_agents.specs import array_spec
 
 
+class SlowStartingEnvironment(random_py_environment.RandomPyEnvironment):
+  def __init__(self, *args, **kwargs):
+    time_sleep = kwargs.pop('time_sleep', 1.0)
+    time.sleep(time_sleep)
+    super().__init__(*args, **kwargs)
+
+
 class ParallelPyEnvironmentTest(tf.test.TestCase):
 
-  def _make_parallel_py_environment(self, constructor=None, num_envs=2):
+  def setUp(self):
+    parallel_py_environment.multiprocessing = dummy_multiprocessing
+
+  def _set_default_specs(self):
     self.observation_spec = array_spec.ArraySpec((3, 3), np.float32)
     self.time_step_spec = ts.time_step_spec(self.observation_spec)
     self.action_spec = array_spec.BoundedArraySpec(
-        [7], dtype=np.float32, minimum=-1.0, maximum=1.0)
+      [7], dtype=np.float32, minimum=-1.0, maximum=1.0)
+
+  def _make_parallel_py_environment(self, constructor=None, num_envs=2,
+                                    blocking=True):
+    self._set_default_specs()
     constructor = constructor or functools.partial(
         random_py_environment.RandomPyEnvironment,
         self.observation_spec,
         self.action_spec)
     return parallel_py_environment.ParallelPyEnvironment(
-        env_constructors=[constructor] * num_envs, blocking=True)
+        env_constructors=[constructor] * num_envs, blocking=blocking)
 
   def test_close_no_hang_after_init(self):
     env = self._make_parallel_py_environment()
@@ -78,6 +94,38 @@ class ParallelPyEnvironmentTest(tf.test.TestCase):
     time_step2 = env.step(action)
     self.assertAllEqual(time_step.observation.shape,
                         time_step2.observation.shape)
+    env.close()
+
+  def test_non_blocking_start_processes_in_parallel(self):
+    self._set_default_specs()
+    constructor = functools.partial(SlowStartingEnvironment,
+                                    self.observation_spec,
+                                    self.action_spec, time_sleep=1.0)
+    start_time = time.time()
+    env = self._make_parallel_py_environment(constructor=constructor,
+                                             num_envs=10,
+                                             blocking=False)
+    end_time = time.time()
+    self.assertLessEqual(end_time - start_time, 5.0,
+                         msg=('Expected all processes to start together, '
+                              'got {} wait time').format(
+                           end_time - start_time))
+    env.close()
+
+  def test_blocking_start_processes_one_after_another(self):
+    self._set_default_specs()
+    constructor = functools.partial(SlowStartingEnvironment,
+                                    self.observation_spec,
+                                    self.action_spec, time_sleep=1.0)
+    start_time = time.time()
+    env = self._make_parallel_py_environment(constructor=constructor,
+                                             num_envs=10,
+                                             blocking=True)
+    end_time = time.time()
+    self.assertGreater(end_time - start_time, 10,
+                       msg=('Expected all processes to start one '
+                            'after another, got {} wait time').format(
+                         end_time - start_time))
     env.close()
 
   def test_unstack_actions(self):
